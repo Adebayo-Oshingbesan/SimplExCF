@@ -2,8 +2,14 @@ from functools import partial
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
 import torch
 from src.simplex import Simplex
+
+            
+from alibi.explainers import Counterfactual, CounterfactualProto
+import tensorflow as tf
+tf.compat.v1.disable_eager_execution()
 
 def get_simplex(model, corpus, test, verbose = False):
     corpus_latents = model.latent_representation(corpus).detach()
@@ -83,3 +89,52 @@ def display_image_cfs(cfs, model, x, desired_class):
             print('Predicted: ', model(torch.Tensor(kept_cf)).argmax(), ' || ', 'Desired: ', desired_class, ' || ', 'Orginal: ',  model(x).argmax())
             print('Sparsity = ', (diff).float().mean())
             print()
+
+
+def get_cfproto_cf(X_corpus, model, x):
+    shape = (1,) + X_corpus.shape[1:]
+    predict_fn = lambda x: torch.exp(model(torch.Tensor(x))).detach().numpy()
+    cf = CounterfactualProto(predict_fn, shape, use_kdtree = True)
+    cf.fit(X_corpus, trustscore_kwargs=None)
+    explanation = cf.explain(x)
+    return torch.Tensor(explanation.cf['X'])
+
+def get_cf_nproto_cf(X_corpus, model, x):
+    shape = (1,) + X_corpus.shape[1:]
+    target_proba = 1.0
+    tol = 0.01 # want counterfactuals with p(class)>0.99
+    target_class = 'other' # any class other than 7 will do
+    max_iter = 100
+    lam_init = 1e-1
+    max_lam_steps = 10
+    learning_rate_init = 0.1
+    feature_range = (X_corpus.min(),X_corpus.max())
+
+    predict_fn = lambda x: torch.exp(model(torch.Tensor(x))).detach().numpy()
+
+    # initialize explainer
+    cf = Counterfactual(predict_fn, shape=shape, target_proba=target_proba, tol=tol,
+                        target_class=target_class, max_iter=max_iter, lam_init=lam_init,
+                        max_lam_steps=max_lam_steps, learning_rate_init=learning_rate_init,
+                        feature_range=feature_range)
+    explanation = cf.explain(x)
+    return torch.Tensor(explanation.cf['X'])
+
+def get_simplex_cf_tabular(simplex, model, test_id, encoder, n_cfs = 5):
+    x = simplex.test_examples[test_id : test_id+1]
+    desired_class = model(x).topk(2).indices[0,1]
+    
+    cat_indices = list(range(len(encoder.cols)))
+
+    cfs = simplex.get_counterfactuals(test_id = test_id, model = model, n_counterfactuals = n_cfs,
+                                      cat_indices = cat_indices)
+    return cfs, x, desired_class
+
+def get_simplex_cf_image(simplex, model, test_id, n_cfs = 5):
+    x = simplex.test_examples[test_id : test_id+1]
+    desired_class = model(x).topk(2).indices[0,1]
+    
+
+    cfs = simplex.get_counterfactuals(test_id = test_id, model = model, 
+                                      n_counterfactuals = n_cfs, min_epochs = 50)
+    return cfs, x, desired_class

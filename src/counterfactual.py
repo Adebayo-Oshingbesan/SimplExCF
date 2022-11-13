@@ -5,7 +5,7 @@ from src.prototype import prototype_selector
 
 import hnswlib
 import numpy as np
-from tqdm import tqdm
+# from tqdm import tqdm
 
 from sklearn.metrics.pairwise import euclidean_distances
 import torch
@@ -51,7 +51,7 @@ def build_counterfactual_decoder(model, test, test_latent_approx, prototype, tar
     autoencoder.to(device)
     optimizer = torch.optim.Adam([param for param in autoencoder.parameters() if param.requires_grad == True])
     
-    for i in tqdm(range(max_epochs)):
+    for i in range(max_epochs):
         data = test.to(device)
         optimizer.zero_grad()
 
@@ -177,7 +177,7 @@ def get_counterfactuals(model, corpus, test, test_latent_approx, target,  \
                         mask = None, n_bins = 50, cat_indices = None, \
                     n_counterfactuals = 1, epsilon_weight = 1e-3, baseline = None, \
                         device = 'cpu', neighbors = 'exact', lag = 0,\
-                    l1_weight = 1e-2, min_epochs = 10, max_epochs = 100, mins = None, maxs = None, \
+                    l1_weight = 1e-2, min_epochs = 50, max_epochs = 100, mins = None, maxs = None, \
                     elastic_net_factor = 1, ae_factor = 1, target_factor = 1, prototype_factor = 1):
     
     if model(test).shape[-1] > 1:
@@ -238,20 +238,21 @@ def get_counterfactuals(model, corpus, test, test_latent_approx, target,  \
     # If categorical values exist, 
     # modify candidates to use categories from neighbors in latent space.
     # Else, use candidates directly.
-    if cat_indices is not None:
-        bool_idx = model(corpus).argmax(axis=1) == target
-        sub_X = corpus[bool_idx]
-        sub_X_ = corpus_[bool_idx]
-        
-        embs = model.latent_representation(cfs).detach().numpy()
-        if neighbors == 'exact':
-            k_idx = nearest_neighbors_exact(embs,sub_X_,n_counterfactuals)
-        else:
-            p = build_index(sub_X_, dim = model.latent_dim)
-            k_idx = nearest_neighbors_approximate(p,embs,n_counterfactuals)
+    bool_idx = model(corpus).argmax(axis=1) == target
+    sub_X = corpus[bool_idx]
+    sub_X_ = corpus_[bool_idx]
 
-        shape = list(test.shape)
-        shape[0] = n_counterfactuals
+    embs = model.latent_representation(cfs).detach().numpy()
+    if neighbors == 'exact':
+        k_idx = nearest_neighbors_exact(embs,sub_X_,n_counterfactuals)
+    else:
+        p = build_index(sub_X_, dim = model.latent_dim)
+        k_idx = nearest_neighbors_approximate(p,embs,n_counterfactuals)
+
+    shape = list(test.shape)
+    shape[0] = n_counterfactuals
+    
+    if cat_indices is not None:
         inputs = sub_X[k_idx].reshape(shape)
         inputs = mask * inputs + (1 - mask) * test
         inputs_ = generate_candidates_with_neighbours(cfs.detach().clone(), 
@@ -291,7 +292,7 @@ def get_counterfactuals(model, corpus, test, test_latent_approx, target,  \
             else:
                 vals_to_check = [float(s) for s in sorted_attrbs]
         else:
-            sorted_attrbs = sorted(attr.squeeze().detach().numpy())
+            sorted_attrbs = sorted(attr[attr > 0].squeeze().detach().numpy())
             vals_to_check = [sorted_attrbs[int(i/100 * len(sorted_attrbs))] for i in range(0,100,2)]
 
         for threshold in reversed(vals_to_check):
@@ -312,7 +313,7 @@ def get_counterfactuals(model, corpus, test, test_latent_approx, target,  \
     
     counterfactuals = torch.unique(torch.vstack(counterfactuals),dim=0)
     
-    # If data is tabular, return top n_counterfactuals instances with the minimal sparsity
+    # return top n_counterfactuals instances with the minimal sparsity
     if data_type == 'table':
         idx = (counterfactuals != test).sum(axis = 1)
         idx = idx.topk(min([n_counterfactuals, len(idx)]), largest = False, sorted = True)
