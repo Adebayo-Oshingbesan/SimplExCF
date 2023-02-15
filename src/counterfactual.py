@@ -42,6 +42,7 @@ def build_counterfactual_decoder(model, test, test_latent_approx, prototype, tar
                                  min_epochs, max_epochs, mask,\
                                 elastic_net_factor, ae_factor, \
                                 target_factor, prototype_factor): 
+    
     size = np.prod(test.size())
     
     if task == 'regression':
@@ -174,9 +175,9 @@ def get_baseline_counterfactuals(model, test, target, corpus, n_counterfactuals 
     return counterfactuals
 
 def get_counterfactuals(model, corpus, test, test_latent_approx, target,  \
-                        mask = None, n_bins = 50, cat_indices = None, \
+                        mask = None, n_bins = 50, cat_indices = None, map_categorical = True, \
                     n_counterfactuals = 1, epsilon_weight = 1e-3, baseline = None, \
-                        device = 'cpu', neighbors = 'exact', lag = 0,\
+                        device = 'cpu', neighbors = 'exact', lag = 0, use_attributions = True, \
                     l1_weight = 1e-2, min_epochs = 50, max_epochs = 100, mins = None, maxs = None, \
                     elastic_net_factor = 1, ae_factor = 1, target_factor = 1, prototype_factor = 1):
     
@@ -238,21 +239,22 @@ def get_counterfactuals(model, corpus, test, test_latent_approx, target,  \
     # If categorical values exist, 
     # modify candidates to use categories from neighbors in latent space.
     # Else, use candidates directly.
-    bool_idx = model(corpus).argmax(axis=1) == target
-    sub_X = corpus[bool_idx]
-    sub_X_ = corpus_[bool_idx]
+    if map_categorical is True:
+        bool_idx = model(corpus).argmax(axis=1) == target
+        sub_X = corpus[bool_idx]
+        sub_X_ = corpus_[bool_idx]
 
-    embs = model.latent_representation(cfs).detach().numpy()
-    if neighbors == 'exact':
-        k_idx = nearest_neighbors_exact(embs,sub_X_,n_counterfactuals)
-    else:
-        p = build_index(sub_X_, dim = model.latent_dim)
-        k_idx = nearest_neighbors_approximate(p,embs,n_counterfactuals)
+        embs = model.latent_representation(cfs).detach().numpy()
+        if neighbors == 'exact':
+            k_idx = nearest_neighbors_exact(embs,sub_X_,n_counterfactuals)
+        else:
+            p = build_index(sub_X_, dim = model.latent_dim)
+            k_idx = nearest_neighbors_approximate(p,embs,n_counterfactuals)
 
-    shape = list(test.shape)
-    shape[0] = n_counterfactuals
+        shape = list(test.shape)
+        shape[0] = n_counterfactuals
     
-    if cat_indices is not None:
+    if cat_indices is not None and map_categorical is True:
         inputs = sub_X[k_idx].reshape(shape)
         inputs = mask * inputs + (1 - mask) * test
         inputs_ = generate_candidates_with_neighbours(cfs.detach().clone(), 
@@ -268,45 +270,49 @@ def get_counterfactuals(model, corpus, test, test_latent_approx, target,  \
         inputs = torch.unique(inputs, dim=0)
         inputs = inputs[model(inputs).argmax(axis = 1) == target]
     
-    # Get feature-level attributions for the candidates and use this to
-    # additionally improve sparsity.
-    attributions = get_attributions(inputs, baseline, model, n_bins)
-    
-    for i, attr in enumerate(attributions):
-        attr = attr.reshape(1, *attr.shape)
-        test_ = test.detach().clone()
-        inp = inputs[i,:].detach().clone().reshape(*test.shape)
-        kept_cf = None
+    if use_attributions:
+        # Get feature-level attributions for the candidates and use this to
+        # additionally improve sparsity.
+        attributions = get_attributions(inputs, baseline, model, n_bins)
         
-        # Return a counterfactual such that the minimal possible change to original
-        # instance required to change the target is returned.
-        if data_type == 'table':
-            f_attr = attr.squeeze().detach().numpy()
-            if  f_attr.size > 1:
-                sorted_attrbs = sorted(f_attr)
+        for i, attr in enumerate(attributions):
+            attr = attr.reshape(1, *attr.shape)
+            test_ = test.detach().clone()
+            inp = inputs[i,:].detach().clone().reshape(*test.shape)
+            kept_cf = None
+            
+            # Return a counterfactual such that the minimal possible change to original
+            # instance required to change the target is returned.
+            if data_type == 'table':
+                f_attr = attr.squeeze().detach().numpy()
+                if  f_attr.size > 1:
+                    sorted_attrbs = sorted(f_attr)
+                else:
+                    sorted_attrbs = [f_attr]
+
+                if len(sorted_attrbs) > 20:
+                    vals_to_check = list(sorted(set([sorted_attrbs[int(i/100 * len(sorted_attrbs))] for i in range(0,100,5)])))
+                else:
+                    vals_to_check = [float(s) for s in sorted_attrbs]
             else:
-                sorted_attrbs = [f_attr]
+                sorted_attrbs = sorted(attr[attr > 0].squeeze().detach().numpy())
+                vals_to_check = [sorted_attrbs[int(i/100 * len(sorted_attrbs))] for i in range(0,100,2)]
 
-            if len(sorted_attrbs) > 20:
-                vals_to_check = list(sorted(set([sorted_attrbs[int(i/100 * len(sorted_attrbs))] for i in range(0,100,5)])))
-            else:
-                vals_to_check = [float(s) for s in sorted_attrbs]
-        else:
-            sorted_attrbs = sorted(attr[attr > 0].squeeze().detach().numpy())
-            vals_to_check = [sorted_attrbs[int(i/100 * len(sorted_attrbs))] for i in range(0,100,2)]
+            for threshold in reversed(vals_to_check):
+                b = (attr >= threshold).float()
+                test_ = (inp * b) + (test.detach().clone() * (1 - b))
+                test_ = torch.clip(test_, minimum, maximum)
+                pred = model(test_).argmax()
 
-        for threshold in reversed(vals_to_check):
-            b = (attr >= threshold).float()
-            test_ = (inp * b) + (test.detach().clone() * (1 - b))
-            test_ = torch.clip(test_, minimum, maximum)
-            pred = model(test_).argmax()
+                if pred == target:
+                    kept_cf = test_.detach().clone()
+                    break
 
-            if pred == target:
-                kept_cf = test_.detach().clone()
-                break
-
-        if kept_cf is not None:
-            counterfactuals.append(kept_cf)
+            if kept_cf is not None:
+                counterfactuals.append(kept_cf)
+    else:
+        for cf in inputs:
+            counterfactuals.append(cf)
     
     if len(counterfactuals) == 0:
         return

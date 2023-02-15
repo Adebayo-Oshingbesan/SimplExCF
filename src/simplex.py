@@ -108,7 +108,7 @@ class Simplex:
         approx_reps = self.weights @ self.corpus_latent_reps
         return approx_reps
 
-    def decompose(self, test_id: int, return_id: bool = False) -> list or tuple:
+    def decompose(self, test_id: int, n_keep = 3, return_id: bool = False) -> list or tuple:
         """
         Returns a complete corpus decomposition of the test example identified with test_id
         :param test_id: batch index of the test example
@@ -119,7 +119,7 @@ class Simplex:
         assert test_id < self.n_test
         weights = self.weights[test_id].cpu().numpy()
         # return (weights, self.corpus_examples, self.jacobian_projections)
-        sort_id = np.argsort(weights)[::-1]
+        sort_id = np.argsort(weights)[::-1][:n_keep]
         if return_id:
             return [
                 (weights[i], self.corpus_examples[i], self.jacobian_projections[i])
@@ -128,7 +128,7 @@ class Simplex:
         else:
             return [
                 (weights[i], self.corpus_examples[i], self.jacobian_projections[i])
-                for i in sort_id
+                for i in sort_id[:n_keep]
             ]
 
     def plot_hist(self) -> None:
@@ -178,21 +178,49 @@ class Simplex:
         return self.jacobian_projections
                 
         
-    def get_counterfactuals(self, test_id, model, n_counterfactuals = 1, mask = None, n_bins = 50, \
-                            cat_indices = None, epsilon_weight = 1e-3, baseline = None, device = 'cpu', \
+    def get_counterfactuals(self, test_id, model, n_counterfactuals = 1, mask = None, n_bins = 50, use_attributions = True, \
+                            cat_indices = None, epsilon_weight = 1e-3, baseline = None, device = 'cpu', map_categorical = True,\
                             min_epochs = 10, max_epochs = 100, l1_weight = 1e-2, mins = None, maxs = None, \
-                            elastic_net_factor = 1, ae_factor = 1, target_factor = 1, prototype_factor = 1):
+                            elastic_net_factor = 1, ae_factor = 1, target_factor = 1, prototype_factor = 1, use_latent_approximation = True):
         
         test = self.test_examples[test_id:test_id + 1]
-        test_latent_approx = self.latent_approx()[
-                                        test_id : test_id + 1]
+        if use_latent_approximation:
+            test_latent = self.latent_approx()[
+                                            test_id : test_id + 1]
+        else:
+            test_latent = self.test_latent_reps[test_id : test_id + 1]
         target = model(test).topk(2).indices[0,1]
         
-        return get_counterfactuals(model = model, corpus = self.corpus_examples, test = test, \
-                                test_latent_approx = test_latent_approx , target = target,  \
+        return get_counterfactuals(model = model, corpus = self.corpus_examples, test = test, map_categorical = map_categorical, \
+                                test_latent_approx = test_latent , target = target,  use_attributions = use_attributions,\
                                 mask = mask, n_bins = n_bins, cat_indices = cat_indices, \
                                 n_counterfactuals = n_counterfactuals, epsilon_weight = epsilon_weight, \
                                 baseline = baseline, device = device, l1_weight = l1_weight, \
                                 min_epochs = min_epochs, max_epochs = max_epochs, mins = mins, maxs = maxs, \
                                 elastic_net_factor = elastic_net_factor, ae_factor = ae_factor, \
                                 target_factor = target_factor, prototype_factor = prototype_factor)
+    
+    def get_full_test_explanation(self, model, test_id = None):
+        input_baseline = torch.zeros(self.corpus_examples.shape) # Baseline tensor of the same shape as corpus_inputs
+        results = []
+        
+        range_ids = range(len(self.test_examples)) if test_id is None else [test_id]
+        for i in range_ids:
+            self.jacobian_projection(test_id=i, model=model, input_baseline=input_baseline)
+            result = self.decompose(test_id = i, return_id = True)
+            results.append(result)
+        return results
+
+    def get_counterfactuals_explanation(self, model, cfs, cf_index = None):
+        cf_simplex = Simplex(corpus_examples=self.corpus_examples, corpus_latent_reps=self.corpus_latent_reps)
+        cfs_latents = model.latent_representation(cfs)
+        cf_simplex.fit(test_examples=cfs, test_latent_reps = cfs_latents, verbose = False)
+        input_baseline = torch.zeros(self.corpus_examples.shape)
+
+        results = []
+        range_ids = range(len(cfs)) if  cf_index is None else [cf_index]
+        for i in range_ids:
+            cf_simplex.jacobian_projection(test_id = i, model=model, input_baseline=input_baseline)
+            result = cf_simplex.decompose(test_id = i, return_id = True)
+            results.append(result)
+        return results
